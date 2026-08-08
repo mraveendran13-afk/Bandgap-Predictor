@@ -100,21 +100,24 @@ with st.sidebar:
     )
 
 # --- Main input ---
-col1, col2 = st.columns([2, 1])
-with col1:
-    formula = st.text_input(
-        "Chemical formula",
-        value="SrTiO3",
-        help="Enter any chemical formula, e.g. Si, GaAs, Fe2O3, SrTiO3, MoS2"
-    ).strip()
-with col2:
-    st.markdown("**Quick examples:**")
-    examples = ["Si", "GaAs", "SiO2", "TiO2", "MoS2", "Cu", "SrTiO3", "Fe2O3", "Al2O3", "ZnO"]
-    ex_cols = st.columns(2)
-    for i, ex in enumerate(examples):
-        if ex_cols[i % 2].button(ex, key=f"ex_{ex}", use_container_width=True):
-            formula = ex
-            st.rerun()
+# Initialize state
+if "formula" not in st.session_state:
+    st.session_state.formula = "SrTiO3"
+
+# Example buttons — clicking sets session state BEFORE text_input renders
+st.markdown("**Quick examples** — click any to try:")
+examples = ["Si", "GaAs", "SiO2", "TiO2", "MoS2", "Cu", "SrTiO3", "Fe2O3", "Al2O3", "ZnO"]
+ex_cols = st.columns(len(examples))
+for i, ex in enumerate(examples):
+    if ex_cols[i].button(ex, key=f"ex_{ex}", use_container_width=True):
+        st.session_state.formula = ex
+
+formula = st.text_input(
+    "Chemical formula",
+    value=st.session_state.formula,
+    key="formula_input",
+    help="Enter any chemical formula, e.g. Si, GaAs, Fe2O3, SrTiO3, MoS2"
+).strip()
 
 if formula:
     pred, error = predict_bandgap(formula, model, ep, scaler)
