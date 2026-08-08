@@ -101,20 +101,22 @@ with st.sidebar:
 
 # --- Main input ---
 # Initialize state
-if "formula" not in st.session_state:
-    st.session_state.formula = "SrTiO3"
+if "formula_input" not in st.session_state:
+    st.session_state.formula_input = "SrTiO3"
 
-# Example buttons — clicking sets session state BEFORE text_input renders
+def set_formula(f):
+    st.session_state.formula_input = f
+
+# Example buttons — on_click updates the input BEFORE it's rendered
 st.markdown("**Quick examples** — click any to try:")
 examples = ["Si", "GaAs", "SiO2", "TiO2", "MoS2", "Cu", "SrTiO3", "Fe2O3", "Al2O3", "ZnO"]
 ex_cols = st.columns(len(examples))
 for i, ex in enumerate(examples):
-    if ex_cols[i].button(ex, key=f"ex_{ex}", use_container_width=True):
-        st.session_state.formula = ex
+    ex_cols[i].button(ex, key=f"ex_{ex}", use_container_width=True,
+                       on_click=set_formula, args=(ex,))
 
 formula = st.text_input(
     "Chemical formula",
-    value=st.session_state.formula,
     key="formula_input",
     help="Enter any chemical formula, e.g. Si, GaAs, Fe2O3, SrTiO3, MoS2"
 ).strip()
