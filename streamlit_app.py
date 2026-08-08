@@ -99,102 +99,193 @@ with st.sidebar:
         f"Test MAE: {metrics['rf_test_mae']:.3f} eV | R²: {metrics['rf_test_r2']:.3f}"
     )
 
-# --- Main input ---
-# Initialize state
-if "formula_input" not in st.session_state:
-    st.session_state.formula_input = "SrTiO3"
+tab1, tab2 = st.tabs(["🔍 Single prediction", "📦 Batch prediction (CSV)"])
 
-def set_formula(f):
-    st.session_state.formula_input = f
+with tab1:
+    # --- Main input ---
+    # Initialize state
+    if "formula_input" not in st.session_state:
+        st.session_state.formula_input = "SrTiO3"
 
-# Example buttons — on_click updates the input BEFORE it's rendered
-st.markdown("**Quick examples** — click any to try:")
-examples = ["Si", "GaAs", "SiO2", "TiO2", "MoS2", "Cu", "SrTiO3", "Fe2O3", "Al2O3", "ZnO"]
-ex_cols = st.columns(len(examples))
-for i, ex in enumerate(examples):
-    ex_cols[i].button(ex, key=f"ex_{ex}", use_container_width=True,
-                       on_click=set_formula, args=(ex,))
+    def set_formula(f):
+        st.session_state.formula_input = f
 
-formula = st.text_input(
-    "Chemical formula",
-    key="formula_input",
-    help="Enter any chemical formula, e.g. Si, GaAs, Fe2O3, SrTiO3, MoS2"
-).strip()
+    # Example buttons — on_click updates the input BEFORE it's rendered
+    st.markdown("**Quick examples** — click any to try:")
+    examples = ["Si", "GaAs", "SiO2", "TiO2", "MoS2", "Cu", "SrTiO3", "Fe2O3", "Al2O3", "ZnO"]
+    ex_cols = st.columns(len(examples))
+    for i, ex in enumerate(examples):
+        ex_cols[i].button(ex, key=f"ex_{ex}", use_container_width=True,
+                           on_click=set_formula, args=(ex,))
 
-if formula:
-    pred, error = predict_bandgap(formula, model, ep, scaler)
+    formula = st.text_input(
+        "Chemical formula",
+        key="formula_input",
+        help="Enter any chemical formula, e.g. Si, GaAs, Fe2O3, SrTiO3, MoS2"
+    ).strip()
+
+    if formula:
+        pred, error = predict_bandgap(formula, model, ep, scaler)
+        
+        if error:
+            st.error(error)
+        else:
+            # Result card
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Predicted bandgap", f"{pred:.2f} eV")
+            
+            # Classification
+            if pred < 0.1:
+                classification = "Metal"
+                color = "🟡"
+            elif pred < 3.0:
+                classification = "Semiconductor"
+                color = "🔵"
+            else:
+                classification = "Insulator"
+                color = "🟣"
+            col2.metric("Material type", f"{color} {classification}")
+            
+            # Confidence proxy (uncertainty estimate)
+            uncertainty = metrics['nn_test_mae']
+            col3.metric("Typical error", f"± {uncertainty:.2f} eV")
+            
+            # Interpretation
+            st.markdown("---")
+            st.subheader("Interpretation")
+            
+            if pred < 0.1:
+                st.info(f"**{formula}** is predicted to be metallic (bandgap ≈ 0). "
+                        "Electrons can move freely — good conductor.")
+            elif pred < 1.5:
+                st.info(f"**{formula}** is predicted to be a narrow-gap semiconductor. "
+                        f"Bandgap of {pred:.2f} eV is typical of infrared/thermal photovoltaic materials.")
+            elif pred < 3.5:
+                st.info(f"**{formula}** is predicted to be a semiconductor with bandgap {pred:.2f} eV. "
+                        f"This range covers visible-light absorbers (solar cells, LEDs).")
+            else:
+                st.info(f"**{formula}** is predicted to be a wide-gap insulator ({pred:.2f} eV). "
+                        "Typical of ceramics, transparent conductors, UV-transparent materials.")
+            
+            # Comparison bar chart
+            with st.expander("Compare with well-known compounds", expanded=False):
+                reference = {
+                    'Copper (Cu)': 0.0,
+                    'Silicon (Si)': 1.11,
+                    'GaAs': 1.42,
+                    'CdTe': 1.44,
+                    'ZnO': 3.37,
+                    'TiO2': 3.20,
+                    'GaN': 3.40,
+                    'SiO2': 9.00,
+                    'Al2O3': 8.80,
+                }
+                reference[f'YOUR: {formula}'] = pred
+                
+                df_ref = pd.DataFrame({
+                    'Material': list(reference.keys()),
+                    'Bandgap (eV)': list(reference.values()),
+                }).sort_values('Bandgap (eV)')
+                
+                fig, ax = plt.subplots(figsize=(10, 5))
+                colors = ['red' if 'YOUR' in m else 'steelblue' for m in df_ref['Material']]
+                ax.barh(df_ref['Material'], df_ref['Bandgap (eV)'], color=colors)
+                ax.set_xlabel('Bandgap (eV)')
+                ax.axvspan(0, 0.1, alpha=0.1, color='yellow', label='Metal')
+                ax.axvspan(0.1, 3.0, alpha=0.1, color='blue', label='Semiconductor')
+                ax.axvspan(3.0, 12, alpha=0.1, color='purple', label='Insulator')
+                ax.legend(loc='lower right')
+                ax.grid(alpha=0.3, axis='x')
+                plt.tight_layout()
+                st.pyplot(fig)
+
+with tab2:
+    st.markdown("**Upload a CSV** with a column named `formula` — get bandgap predictions for all compounds at once.")
+    st.markdown("Useful for screening large candidate lists.")
     
-    if error:
-        st.error(error)
-    else:
-        # Result card
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Predicted bandgap", f"{pred:.2f} eV")
+    with st.expander("CSV format example", expanded=False):
+        st.code("formula\nSi\nGaAs\nSrTiO3\nMoS2\nFe2O3", language="text")
+        st.caption("One formula per row. Other columns are preserved in the output.")
+    
+    # Sample CSV download
+    sample = pd.DataFrame({
+        "formula": ["Si", "GaAs", "SrTiO3", "MoS2", "CdS", "ZnO", "TiO2", "Fe2O3",
+                    "CsPbI3", "BaTiO3", "MgO", "Al2O3", "Cu", "Fe"]
+    })
+    st.download_button("📄 Download sample CSV template", sample.to_csv(index=False),
+                       file_name="bandgap_input_template.csv", mime="text/csv")
+    
+    uploaded = st.file_uploader("Upload your CSV", type=["csv"])
+    
+    if uploaded is not None:
+        try:
+            input_df = pd.read_csv(uploaded)
+        except Exception as e:
+            st.error(f"Failed to read CSV: {e}")
+            input_df = None
         
-        # Classification
-        if pred < 0.1:
-            classification = "Metal"
-            color = "🟡"
-        elif pred < 3.0:
-            classification = "Semiconductor"
-            color = "🔵"
-        else:
-            classification = "Insulator"
-            color = "🟣"
-        col2.metric("Material type", f"{color} {classification}")
-        
-        # Confidence proxy (uncertainty estimate)
-        uncertainty = metrics['nn_test_mae']
-        col3.metric("Typical error", f"± {uncertainty:.2f} eV")
-        
-        # Interpretation
-        st.markdown("---")
-        st.subheader("Interpretation")
-        
-        if pred < 0.1:
-            st.info(f"**{formula}** is predicted to be metallic (bandgap ≈ 0). "
-                    "Electrons can move freely — good conductor.")
-        elif pred < 1.5:
-            st.info(f"**{formula}** is predicted to be a narrow-gap semiconductor. "
-                    f"Bandgap of {pred:.2f} eV is typical of infrared/thermal photovoltaic materials.")
-        elif pred < 3.5:
-            st.info(f"**{formula}** is predicted to be a semiconductor with bandgap {pred:.2f} eV. "
-                    f"This range covers visible-light absorbers (solar cells, LEDs).")
-        else:
-            st.info(f"**{formula}** is predicted to be a wide-gap insulator ({pred:.2f} eV). "
-                    "Typical of ceramics, transparent conductors, UV-transparent materials.")
-        
-        # Comparison bar chart
-        with st.expander("Compare with well-known compounds", expanded=False):
-            reference = {
-                'Copper (Cu)': 0.0,
-                'Silicon (Si)': 1.11,
-                'GaAs': 1.42,
-                'CdTe': 1.44,
-                'ZnO': 3.37,
-                'TiO2': 3.20,
-                'GaN': 3.40,
-                'SiO2': 9.00,
-                'Al2O3': 8.80,
-            }
-            reference[f'YOUR: {formula}'] = pred
-            
-            df_ref = pd.DataFrame({
-                'Material': list(reference.keys()),
-                'Bandgap (eV)': list(reference.values()),
-            }).sort_values('Bandgap (eV)')
-            
-            fig, ax = plt.subplots(figsize=(10, 5))
-            colors = ['red' if 'YOUR' in m else 'steelblue' for m in df_ref['Material']]
-            ax.barh(df_ref['Material'], df_ref['Bandgap (eV)'], color=colors)
-            ax.set_xlabel('Bandgap (eV)')
-            ax.axvspan(0, 0.1, alpha=0.1, color='yellow', label='Metal')
-            ax.axvspan(0.1, 3.0, alpha=0.1, color='blue', label='Semiconductor')
-            ax.axvspan(3.0, 12, alpha=0.1, color='purple', label='Insulator')
-            ax.legend(loc='lower right')
-            ax.grid(alpha=0.3, axis='x')
-            plt.tight_layout()
-            st.pyplot(fig)
+        if input_df is not None:
+            if "formula" not in input_df.columns:
+                st.error("CSV must contain a column named `formula`.")
+            elif len(input_df) == 0:
+                st.error("CSV is empty.")
+            elif len(input_df) > 5000:
+                st.error(f"CSV has {len(input_df)} rows — please cap at 5000 to keep the app responsive.")
+            else:
+                st.success(f"Loaded {len(input_df)} formulas. Predicting…")
+                progress = st.progress(0.0, text="Processing…")
+                
+                predictions = []
+                errors = []
+                types = []
+                for i, formula in enumerate(input_df["formula"].astype(str)):
+                    pred, err = predict_bandgap(formula.strip(), model, ep, scaler)
+                    if err:
+                        predictions.append(None)
+                        errors.append(err)
+                        types.append(None)
+                    else:
+                        predictions.append(round(pred, 3))
+                        errors.append("")
+                        if pred < 0.1:
+                            types.append("Metal")
+                        elif pred < 3.0:
+                            types.append("Semiconductor")
+                        else:
+                            types.append("Insulator")
+                    if (i + 1) % 10 == 0 or i == len(input_df) - 1:
+                        progress.progress((i + 1) / len(input_df),
+                                          text=f"Processed {i+1}/{len(input_df)}")
+                progress.empty()
+                
+                output_df = input_df.copy()
+                output_df["predicted_bandgap_eV"] = predictions
+                output_df["material_type"] = types
+                output_df["typical_error_eV"] = metrics["nn_test_mae"]
+                output_df["error_note"] = errors
+                
+                # Show summary
+                n_ok = sum(1 for e in errors if not e)
+                n_err = len(errors) - n_ok
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Total", len(input_df))
+                col2.metric("Predicted", n_ok)
+                col3.metric("Failed", n_err)
+                if n_ok > 0:
+                    n_metal = sum(1 for t in types if t == "Metal")
+                    n_semi = sum(1 for t in types if t == "Semiconductor")
+                    n_ins = sum(1 for t in types if t == "Insulator")
+                    col4.metric("Metal/Semi/Ins", f"{n_metal}/{n_semi}/{n_ins}")
+                
+                st.markdown("### Results")
+                st.dataframe(output_df, use_container_width=True, height=400)
+                
+                st.download_button(
+                    "⬇️ Download results as CSV",
+                    output_df.to_csv(index=False),
+                    file_name="bandgap_predictions.csv",
+                    mime="text/csv",
+                )
 
 st.markdown("---")
 
