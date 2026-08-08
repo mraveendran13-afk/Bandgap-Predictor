@@ -1,0 +1,10 @@
+{
+  "uncorrected_mae": 1.3033829927444458,
+  "rf_corrected_mae": 0.5157052494316656,
+  "nn_corrected_mae": 0.5290773510932922,
+  "best_corrected_mae": 0.5157052494316656,
+  "n_train": 7571,
+  "n_val": 1337,
+  "n_test": 1573,
+  "target": "HSE06 (SNUMAT dataset)"
+}

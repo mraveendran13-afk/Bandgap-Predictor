@@ -54,26 +54,61 @@ def load_metrics():
         return json.load(f)
 
 
-def predict_bandgap(formula, model, ep, scaler):
-    """Predict bandgap for a chemical formula string."""
+@st.cache_resource
+def load_delta_model():
+    try:
+        with open("delta_model.pkl", "rb") as f:
+            blob = pickle.load(f)
+        return blob
+    except FileNotFoundError:
+        return None
+
+
+@st.cache_data
+def load_delta_metrics():
+    try:
+        with open("delta_metrics.json") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+METAL_GATE_THRESHOLD = 0.15  # below this, treat as metal — skip correction
+
+
+def predict_bandgap(formula, model, ep, scaler, delta_blob=None):
+    """Predict bandgap for a chemical formula string.
+    Returns (pbe_pred, corrected_pred_or_None, error_or_None)."""
     try:
         comp = Composition(formula)
     except Exception as e:
-        return None, f"Invalid formula: {e}"
+        return None, None, f"Invalid formula: {e}"
     
     try:
         feats = np.array(ep.featurize(comp), dtype=np.float32).reshape(1, -1)
     except Exception as e:
-        return None, f"Featurization failed: {e}"
+        return None, None, f"Featurization failed: {e}"
     
     if np.isnan(feats).any():
-        return None, "Could not featurize (missing element data — check formula)"
+        return None, None, "Could not featurize (missing element data — check formula)"
     
     feats_s = scaler.transform(feats)
     with torch.no_grad():
         pred = model(torch.tensor(feats_s, dtype=torch.float32)).item()
     pred = max(0.0, pred)
-    return pred, None
+    
+    corrected = None
+    if delta_blob is not None and pred >= METAL_GATE_THRESHOLD:
+        # Metal gate: only apply HSE06 correction to non-metallic predictions.
+        # The delta model was trained mostly on semiconductors/insulators and
+        # over-corrects near-zero-gap metals if applied unconditionally.
+        if delta_blob["type"] == "rf":
+            delta = delta_blob["model"].predict(feats_s)[0]
+            corrected = max(0.0, pred + delta)
+    elif delta_blob is not None and pred < METAL_GATE_THRESHOLD:
+        corrected = pred  # metal — no correction needed
+    
+    return pred, corrected, None
 
 
 # ---- UI ----
@@ -85,6 +120,9 @@ st.markdown(
 
 model, ep, scaler = load_model_and_featurizer()
 metrics = load_metrics()
+delta_blob = load_delta_model()
+delta_metrics = load_delta_metrics()
+has_correction = delta_blob is not None
 
 # --- Sidebar with metrics ---
 with st.sidebar:
@@ -98,6 +136,18 @@ with st.sidebar:
         f"**Random Forest baseline** (for reference):\n\n"
         f"Test MAE: {metrics['rf_test_mae']:.3f} eV | R²: {metrics['rf_test_r2']:.3f}"
     )
+    if has_correction and delta_metrics:
+        st.markdown("---")
+        st.subheader("HSE06 correction")
+        st.caption(
+            "PBE (raw DFT) systematically underestimates bandgaps. A second "
+            "Δ-learning model, trained on 10,481 compounds with hybrid-functional "
+            "(HSE06) bandgaps, corrects for this."
+        )
+        st.metric("Corrected MAE vs HSE06", f"{delta_metrics['best_corrected_mae']:.3f} eV",
+                   delta=f"-{delta_metrics['uncorrected_mae'] - delta_metrics['best_corrected_mae']:.3f} eV",
+                   delta_color="normal")
+        st.caption(f"(uncorrected: {delta_metrics['uncorrected_mae']:.3f} eV)")
 
 tab1, tab2 = st.tabs(["🔍 Single prediction", "📦 Batch prediction (CSV)"])
 
@@ -125,20 +175,26 @@ with tab1:
     ).strip()
 
     if formula:
-        pred, error = predict_bandgap(formula, model, ep, scaler)
+        pred, corrected, error = predict_bandgap(formula, model, ep, scaler, delta_blob)
         
         if error:
             st.error(error)
         else:
+            display_val = corrected if corrected is not None else pred
+            
             # Result card
             col1, col2, col3 = st.columns(3)
-            col1.metric("Predicted bandgap", f"{pred:.2f} eV")
+            if has_correction and corrected is not None:
+                col1.metric("HSE06-corrected estimate", f"{corrected:.2f} eV",
+                            help=f"Raw PBE prediction: {pred:.2f} eV")
+            else:
+                col1.metric("Predicted bandgap", f"{pred:.2f} eV")
             
-            # Classification
-            if pred < 0.1:
+            # Classification (based on corrected value if available)
+            if display_val < 0.1:
                 classification = "Metal"
                 color = "🟡"
-            elif pred < 3.0:
+            elif display_val < 3.0:
                 classification = "Semiconductor"
                 color = "🔵"
             else:
@@ -146,9 +202,15 @@ with tab1:
                 color = "🟣"
             col2.metric("Material type", f"{color} {classification}")
             
-            # Confidence proxy (uncertainty estimate)
-            uncertainty = metrics['nn_test_mae']
+            # Uncertainty estimate
+            uncertainty = delta_metrics['best_corrected_mae'] if (has_correction and delta_metrics) else metrics['nn_test_mae']
             col3.metric("Typical error", f"± {uncertainty:.2f} eV")
+            
+            if has_correction and corrected is not None and abs(corrected - pred) > 0.05:
+                st.caption(f"ℹ️ Raw PBE-level prediction was {pred:.2f} eV — corrected upward to account for "
+                           f"DFT's known bandgap underestimation (see sidebar).")
+            
+            pred = display_val  # downstream interpretation text uses the best available estimate
             
             # Interpretation
             st.markdown("---")
@@ -236,20 +298,24 @@ with tab2:
                 progress = st.progress(0.0, text="Processing…")
                 
                 predictions = []
+                corrected_predictions = []
                 errors = []
                 types = []
                 for i, formula in enumerate(input_df["formula"].astype(str)):
-                    pred, err = predict_bandgap(formula.strip(), model, ep, scaler)
+                    pred, corrected, err = predict_bandgap(formula.strip(), model, ep, scaler, delta_blob)
                     if err:
                         predictions.append(None)
+                        corrected_predictions.append(None)
                         errors.append(err)
                         types.append(None)
                     else:
+                        display_val = corrected if corrected is not None else pred
                         predictions.append(round(pred, 3))
+                        corrected_predictions.append(round(corrected, 3) if corrected is not None else None)
                         errors.append("")
-                        if pred < 0.1:
+                        if display_val < 0.1:
                             types.append("Metal")
-                        elif pred < 3.0:
+                        elif display_val < 3.0:
                             types.append("Semiconductor")
                         else:
                             types.append("Insulator")
@@ -259,9 +325,13 @@ with tab2:
                 progress.empty()
                 
                 output_df = input_df.copy()
-                output_df["predicted_bandgap_eV"] = predictions
+                output_df["predicted_bandgap_PBE_eV"] = predictions
+                if has_correction:
+                    output_df["predicted_bandgap_HSE06corrected_eV"] = corrected_predictions
+                    output_df["typical_error_eV"] = delta_metrics["best_corrected_mae"]
+                else:
+                    output_df["typical_error_eV"] = metrics["nn_test_mae"]
                 output_df["material_type"] = types
-                output_df["typical_error_eV"] = metrics["nn_test_mae"]
                 output_df["error_note"] = errors
                 
                 # Show summary
